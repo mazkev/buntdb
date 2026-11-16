@@ -2945,6 +2945,7 @@ func TestIssue112(t *testing.T) {
 	if err != nil {
 		panicErr(err)
 	}
+	defer db.Close()
 	err = db.View(func(tx *Tx) error {
 		_, err := tx.Get("key:112")
 		return err
@@ -2957,4 +2958,85 @@ func TestIssue112(t *testing.T) {
 		})
 		return err
 	})
+}
+
+func TestSpatialExpiredAndIterating(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	err = db.Update(func(tx *Tx) error {
+		err := tx.CreateSpatialIndex("fleet", "fleet:*", IndexRect)
+		if err != nil {
+			return err
+		}
+
+		// Insert one active item and one expired item (TTL 0)
+		_, _, err = tx.Set("fleet:truck1", `[1 1],[1 1]`, nil)
+		if err != nil {
+			return err
+		}
+		_, _, err = tx.Set("fleet:truck2", `[2 2],[2 2]`, &SetOptions{Expires: true, TTL: 0})
+		if err != nil {
+			return err
+		}
+
+		// TTL on expired item should return ErrNotFound
+		if _, err := tx.TTL("fleet:truck2"); err != ErrNotFound {
+			t.Fatalf("expected ErrNotFound for expired item TTL, got %v", err)
+		}
+
+		// Intersects should not yield expired item
+		var intersectsKeys []string
+		err = tx.Intersects("fleet", "[0 0],[10 10]", func(key, value string) bool {
+			// Mutation inside Intersects should return ErrTxIterating
+			if _, _, err := tx.Set("fleet:truck3", `[3 3],[3 3]`, nil); err != ErrTxIterating {
+				t.Fatalf("expected ErrTxIterating, got %v", err)
+			}
+			if _, err := tx.Delete("fleet:truck1"); err != ErrTxIterating {
+				t.Fatalf("expected ErrTxIterating, got %v", err)
+			}
+			if err := tx.DeleteAll(); err != ErrTxIterating {
+				t.Fatalf("expected ErrTxIterating, got %v", err)
+			}
+			intersectsKeys = append(intersectsKeys, key)
+			return true
+		})
+		if err != nil {
+			return err
+		}
+		if len(intersectsKeys) != 1 || intersectsKeys[0] != "fleet:truck1" {
+			t.Fatalf("expected only fleet:truck1, got %v", intersectsKeys)
+		}
+
+		// Nearby should not yield expired item
+		var nearbyKeys []string
+		err = tx.Nearby("fleet", "[0 0],[10 10]", func(key, value string, dist float64) bool {
+			// Mutation inside Nearby should return ErrTxIterating
+			if _, _, err := tx.Set("fleet:truck3", `[3 3],[3 3]`, nil); err != ErrTxIterating {
+				t.Fatalf("expected ErrTxIterating, got %v", err)
+			}
+			if _, err := tx.Delete("fleet:truck1"); err != ErrTxIterating {
+				t.Fatalf("expected ErrTxIterating, got %v", err)
+			}
+			if err := tx.DeleteAll(); err != ErrTxIterating {
+				t.Fatalf("expected ErrTxIterating, got %v", err)
+			}
+			nearbyKeys = append(nearbyKeys, key)
+			return true
+		})
+		if err != nil {
+			return err
+		}
+		if len(nearbyKeys) != 1 || nearbyKeys[0] != "fleet:truck1" {
+			t.Fatalf("expected only fleet:truck1, got %v", nearbyKeys)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }

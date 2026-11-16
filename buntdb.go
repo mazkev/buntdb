@@ -1406,7 +1406,7 @@ func (dbi *dbItem) writeDeleteTo(buf []byte) []byte {
 // expired evaluates id the item has expired. This will always return false when
 // the item does not have `opts.ex` set to true.
 func (dbi *dbItem) expired() bool {
-	return dbi.opts != nil && dbi.opts.ex && time.Now().After(dbi.opts.exat)
+	return dbi.opts != nil && dbi.opts.ex && !time.Now().Before(dbi.opts.exat)
 }
 
 // MaxTime from http://stackoverflow.com/questions/25065055#32620397
@@ -1641,13 +1641,13 @@ func (tx *Tx) TTL(key string) (time.Duration, error) {
 		return 0, ErrTxClosed
 	}
 	item := tx.db.get(key)
-	if item == nil {
+	if item == nil || item.expired() {
 		return 0, ErrNotFound
 	} else if item.opts == nil || !item.opts.ex {
 		return -1, nil
 	}
 	dur := time.Until(item.opts.exat)
-	if dur < 0 {
+	if dur <= 0 {
 		return 0, ErrNotFound
 	}
 	return dur, nil
@@ -1992,6 +1992,9 @@ func (tx *Tx) Nearby(index, bounds string,
 	// // wrap a rtree specific iterator around the user-defined iterator.
 	iter := func(item rtred.Item, dist float64) bool {
 		dbi := item.(*dbItem)
+		if dbi.expired() {
+			return true
+		}
 		return iterator(dbi.key, dbi.val, dist)
 	}
 	idx := tx.db.idxs[index]
@@ -2007,6 +2010,12 @@ func (tx *Tx) Nearby(index, bounds string,
 	var min, max []float64
 	if idx.rect != nil {
 		min, max = idx.rect(bounds)
+	}
+	if tx.wc != nil {
+		tx.wc.itercount++
+		defer func() {
+			tx.wc.itercount--
+		}()
 	}
 	// set the center param to false, which uses the box dist calc.
 	idx.rtr.KNN(&rect{min, max}, false, iter)
@@ -2030,6 +2039,9 @@ func (tx *Tx) Intersects(index, bounds string,
 	// wrap a rtree specific iterator around the user-defined iterator.
 	iter := func(item rtred.Item) bool {
 		dbi := item.(*dbItem)
+		if dbi.expired() {
+			return true
+		}
 		return iterator(dbi.key, dbi.val)
 	}
 	idx := tx.db.idxs[index]
@@ -2045,6 +2057,12 @@ func (tx *Tx) Intersects(index, bounds string,
 	var min, max []float64
 	if idx.rect != nil {
 		min, max = idx.rect(bounds)
+	}
+	if tx.wc != nil {
+		tx.wc.itercount++
+		defer func() {
+			tx.wc.itercount--
+		}()
 	}
 	idx.rtr.Search(&rect{min, max}, iter)
 	return nil
